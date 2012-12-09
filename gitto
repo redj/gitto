@@ -1,0 +1,583 @@
+#! /bin/bash
+#
+# Gitto
+#
+# Copyright (c) 2012, Réjean Loyer
+#
+# All rights reserved.
+#
+#    Redistribution and use in source and binary forms, with or without
+#    modification, are permitted provided that the following conditions are met:
+# 
+#     * Redistributions of source code must retain the above copyright notice,
+#       this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright notice,
+#       this list of conditions and the following disclaimer in the documentation
+#       and/or other materials provided with the distribution.
+#     * Neither the name of Ecere Corporation nor the names of its contributors
+#       may be used to endorse or promote products derived from this software 
+#       without specific prior written permission.
+# 
+#    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+#    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+#    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+#    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+#    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+#    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+#    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+#    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+#    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+#    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+
+#
+# Documentation
+#
+# _create_ Command
+#
+# _destroy_ Command
+#
+#
+#
+# _update_ Command
+#
+# _sync_ Command
+#
+# _commit_ Command
+#
+# _push_ Command
+#
+#
+#
+# _flash_ Command
+#
+#    The _flash_ command is a shortcut for calling the _sync_ command
+#    followed by the _commit_ command followed by the _push_ command.
+#
+#
+#
+# _disk-use_ Command
+#
+#
+#
+# _loop-dirs_ Command
+#
+#
+#
+
+#
+# TODOs:
+#
+#  [   ] add plugin system to the Ecere IDE and implement an OnSave event listener
+#
+#  [   ] write cross-platform version of Gitto in eC
+#           it better be good!
+#
+#  [   ] collaboration / pulling
+#           this is a big one! :P
+#
+#  [   ] print help, version, etc
+#
+#  [   ] add monitoring
+#           currently gitto depends on either manual command line invocation
+#           or application hooks like GittoOnSave.py for Sublime Text 2
+#           and GittoOnSave.ec for the Ecere IDE
+#
+#  [   ] create: take remotes=$2 in by looping through arguments instead of expecting a single string
+#           desired syntax: gitto create <gitto-name> [[<remote-name> <remote-location>]...]
+#
+#  [ ? ] have ~/.gitto.conf
+#           potential uses for gitto config file
+#              if gitto create is used a lot and the remote branch are always the same
+#              format:
+#                 each line starting with remote is a remote with the following syntax
+#                 remote <remote-name> <remote-location>
+#
+#  [   ] speed up sync and update by collecting actual files in a var and
+#        calling git add one once per internal function call
+#           aka gitto_internal_add_new_files and (the other one is not a function yet)
+#        but must check if this will be ok with file / dir names with spaces in them
+#
+#  [   ] improve monitoring collecting and making unique a list of paths to process
+#            and doing processing at set intervals and only onve per path or per gitto
+#            part of this might be done in the bash version by running both inotifywait
+#            and some kind of time ticker and pipe the combined output of those into
+#            a reading loop...
+#
+#  [   ] add option to choose to sync files inside other git repositories
+#
+#  [   ] add option to choose to sync files inside other gitto repositories
+#
+#
+#
+#
+
+rc=0
+
+function gitto_exit_gitto_file_does_not_exist {
+   if [ ! -f "$gitto_dir/.gitto" ]; then
+      echo "error: .gitto file not found."
+      exit 9
+   fi
+   if [ ! -d "$gitto_dir/.git" ]; then
+      echo "error: .git dir not found."
+      exit 9
+   fi
+}
+
+function gitto_exit_if_branch_is_not_gitto {
+   branch_name=$(git symbolic-ref -q HEAD)
+   branch_name="${branch_name##refs/heads/}"
+   if [ "$branch_name" != "gitto" ]; then
+      echo "error: current branch is not gitto."
+      exit 9
+   fi
+}
+
+function gitto_create {
+   gitto_name=$1
+   gitto_mode=$2
+   remotes=$3
+   if [ "$gitto_name" -a [ "$gitto_mode" == "update" -o "$gitto_mode" == "sync" ] ]; then
+      gitto_dir="$PWD/$gitto_name"
+      if [ ! -d "$gitto_dir" ]; then
+         mkdir "$gitto_name"
+         if [ -d "$gitto_dir" ]; then
+            cd "$gitto_name"
+            git init
+            if [ $? == 0 ]; then
+               echo \# This is a Gitto Repository > .gitto
+               echo mode "$gitto_mode" >> .gitto
+               gitto_sync
+               gitto_commit Initial Gitto Commit.
+               git branch -m master gitto
+               if [ $? == 0 ]; then
+                  echo -e "$remotes" |
+                  while read l; do
+                     cmd=$(echo "$l" | cut -d ' ' -f 1 -)
+                     if [ "$cmd" == "remote" ]; then
+                        echo "$l"
+                        remote_name=$(echo "$l" | cut -d ' ' -f 2 -)
+                        remote_loc=$(echo "$l" | cut -d ' ' -f 3 -)
+                        if [ -n "$remote_name" -a -n "$remote_loc" ]; then
+                           if [ -d "$remote_loc" ]; then
+                              cd "$remote_loc"
+                              if [ $? == 0 ]; then
+                                 git clone --bare "$gitto_dir"
+                                 if [ $? == 0 ]; then
+                                    cd "$gitto_dir"
+                                    echo -e "remote ""$remote_name" >> .gitto
+                                    if [ $? == 0 ]; then
+                                       git remote add "$remote_name" "$remote_loc"/"$gitto_name".git
+                                       if [ $? == 0 ]; then
+                                          git push "$remote_name" gitto
+                                       else
+                                          echo "warning: git remote add ""$remote_name""/""$remote_loc"".git failed (""$?"")."
+                                       fi
+                                    else
+                                       echo "warning: git clone --bare ""$gitto_dir"" failed (""$?"")."
+                                    fi
+                                 else
+                                    echo "warning: cd ""$gitto_dir"" failed (""$?"")."
+                                 fi
+                              else
+                                 echo "warning: changing dir to remote url (""$remote_loc"") failed (""$?"")."
+                              fi
+                           else
+                              echo "warning: location for remote (""$remote_loc"") isn't on local file system or doesn't exist."
+                           fi
+                        else
+                           echo "warning: remote needs both a name (""$remote_name"") and a url (""$remote_loc"")."
+                        fi
+                     fi
+                  done
+                  cd "$gitto_dir"
+                  mod_files=$(git ls-files --exclude-standard -m | tr '\n' ' ')
+                  if [[ -n "$mod_files" ]]; then
+                     gitto_flash
+                  fi
+               else
+                  echo "error: git branch -m master gitto failed (""$?"")."
+                  rc=1
+               fi
+            else
+               echo "error: git init failed (""$?"")."
+               rc=1
+            fi
+            cd ..
+         else
+            echo "error: mkdir" "$gitto_name" "failed (""$?"") to create /f/""$gitto_name""."
+            rc=1
+         fi
+      else
+         echo "error:" "$gitto_dir" "already exists."
+         rc=1
+      fi
+   else
+      echo "error: must have a gitto name (""$gitto_name"") and a valid gitto mode (""$gitto_mode"")."
+      rc=1
+   fi
+}
+
+function gitto_destroy {
+   gitto_name=$1
+   if [[ -n "$gitto_name" ]]; then
+      gitto_dir="$PWD/$gitto_name"
+      if [ -d "$gitto_dir" ]; then
+         gitto_exit_gitto_file_does_not_exist
+         cd "$gitto_dir"
+         gitto_exit_if_branch_is_not_gitto
+         cat "$gitto_dir/.gitto" |
+         while read l; do
+            cmd=$(echo "$l" | cut -d ' ' -f 1 -)
+            if [ "$cmd" == "remote" ]; then
+               remote_name=$(echo "$l" | cut -d ' ' -f 2 -)
+               if [ "$remote_name" != "" ]; then
+                  cd "$gitto_dir"
+                  remote_url=$(git remote show "$remote_name" | grep ' Fetch URL: ' | tr ' ' '~')
+                  remote_url="${remote_url#~~Fetch~URL:~}"
+                  if [ -d "$remote_url" ]; then
+                     echo "destroying remote $remote_name"
+                     cd "$remote_url/.." && rm -rf "$gitto_name.git"
+                  else
+                     echo "warning: remote url (""$remote_url"") isn't on local file system or doesn't exist."
+                  fi
+               else
+                  echo "warning: remote needs a name (""$remote_name"")."
+               fi
+            fi
+         done
+         cd "$gitto_dir/.."
+         echo Destroy the last copy yourself.
+         echo careful-rm -rf "$gitto_name"
+      else
+         echo "error: ""$gitto_dir"" does not exist."
+         rc=1
+      fi
+   else
+      echo "error: must have a repository name."
+      rc=1
+   fi
+}
+
+function gitto_check {
+   if [[ -n "$(git ls-files --exclude-standard -omd)" ]]; then
+      new_files=$(git ls-files --exclude-standard -o | tr '\n' ' ')
+      mod_files=$(git ls-files --exclude-standard -m | tr '\n' ' ')
+      del_files=$(git ls-files --exclude-standard -d | tr '\n' ' ')
+      if [[ -n $new_files ]]; then
+         echo_new_files=$(echo echo added files: "$new_files")
+         $echo_new_files
+      fi
+      if [[ -n $mod_files ]]; then
+         echo_mod_files=$(echo echo modified files: "$mod_files")
+         $echo_mod_files
+      fi
+      if [[ -n $del_files ]]; then
+         echo_del_files=$(echo echo deleted files: "$del_files")
+         $echo_del_files
+      fi
+   else
+      if [[ -n $(git diff --cached --name-status) ]]; then
+         new_files=$(git diff --cached --name-only --diff-filter=A | tr '\n' ' ')
+         mod_files=$(git diff --cached --name-only --diff-filter=M | tr '\n' ' ')
+         del_files=$(git diff --cached --name-only --diff-filter=D | tr '\n' ' ')
+         commit_message=$(echo $(if [[ -n "$new_files" ]]; then echo -- added: "$new_files"; fi) $(if [[ -n "$mod_files" ]]; then echo -- modified: "$mod_files"; fi) $(if [[ -n "$del_files" ]]; then echo -- deleted: "$del_files"; fi))
+         echo "$commit_message"
+      else
+         echo No changes.
+      fi
+   fi
+}
+
+#function gitto_internal_update {
+#   mod_files=$(git ls-files --exclude-standard -m | tr '\n' ' ')
+#   if [[ -n $mod_files ]]; then
+#      add_mod_files=$(echo git add -v "${mod_files}")
+#      $add_mod_files
+#   fi
+#}
+#
+#function gitto_update {
+#   if [[ -n "$(git ls-files --exclude-standard -m)" ]]; then
+#      gitto_internal_update
+#   else
+#      echo No modified files to update.
+#      rc=1
+#   fi
+#}
+
+function gitto_internal_ls_new_files {
+   git ls-files --exclude-standard -o "$1" |
+#   git ls-files --exclude-standard -o "$1" | grep -v '/$'
+#   git ls-files --exclude-standard -o "$1" | grep '/$' |
+   while read path; do
+      if [ -d "$path" ]; then
+         gitto_internal_ls_new_files "$path*"
+      else
+         echo "$path"
+      fi
+   done
+}
+
+function gitto_ls_new {
+   echo The following files will be added if you do a sync.
+   gitto_internal_ls_new_files .
+}
+
+function gitto_internal_add_files {
+# attempt at speedup
+# issues with space in dir / file names if not quoted
+# issue with git complaining about the first file when using quotes
+# nothing works...
+#
+#   new_files=$(git ls-files --exclude-standard -"$1" "$2" | grep -v '/$' | sed ':a;N;$!ba;s/\n/\" \"/g')
+#   new_files=$(git ls-files --exclude-standard -"$1" "$2" | grep -v '/$' | sed 's/\ /\\\ /g' | tr '\n' ' ')
+#   if [ -n "$new_files" ]; then
+#      new_files="'$new_files'"
+#      add_new_files=$(echo git add -v -- $new_files)
+#      $add_new_files
+#   fi
+#   git ls-files --exclude-standard -"$1" "$2" | grep '/$' |
+   git ls-files --exclude-standard -"$1" "$2" |
+   while read path; do
+      if [ -d "$path" ]; then
+         gitto_internal_add_files "$1" "$path*"
+      else
+         git add -v "$path"
+      fi
+   done
+}
+
+function gitto_internal_update {
+   mod_files=$(git ls-files --exclude-standard -m | tr '\n' ' ')
+   if [[ -n $mod_files ]]; then
+      add_mod_files=$(echo git add -v "${mod_files}")
+      $add_mod_files
+   fi
+}
+
+function gitto_update {
+   if [[ -n "$(git ls-files --exclude-standard -m)" ]]; then
+      gitto_internal_update
+   else
+      echo No modified files to update.
+      rc=1
+   fi
+}
+
+function gitto_internal_sync {
+   new_files=$(git ls-files --exclude-standard -o)
+   mod_files=$(git ls-files --exclude-standard -m)
+   del_files=$(git ls-files --exclude-standard -d)
+   if [[ -n "$new_files" ]]; then
+      gitto_internal_add_files mo .
+   elif [[ -n "$mod_files" ]]; then
+      gitto_internal_add_files m .
+   fi
+   if [[ -n "$del_files" ]]; then
+      git ls-files --exclude-standard -m |
+      while read path; do
+         git rm "$path"
+      done
+   fi
+}
+
+function gitto_sync {
+   if [[ -n "$(git ls-files --exclude-standard -omd)" ]]; then
+      gitto_internal_sync
+   else
+      echo No changes to sync.
+      rc=1
+   fi
+}
+
+function gitto_commit {
+   if [[ -n "$(git diff --cached --name-status)" ]]; then
+      new_files=$(git diff --cached --name-only --diff-filter=A | tr '\n' ' ')
+      mod_files=$(git diff --cached --name-only --diff-filter=M | tr '\n' ' ')
+      del_files=$(git diff --cached --name-only --diff-filter=D | tr '\n' ' ')
+      if [ -f gitto_commit_message ]; then
+         rm gitto_commit_message
+      fi
+      echo Gitto Commit. > gitto_commit_message
+      commit_message_args="${@}"
+      if [[ -n "$commit_message_args" ]]; then 
+         echo "$commit_message_args" >> gitto_commit_message
+      fi
+      if [[ -n "$new_files" ]]; then 
+         echo new: "$new_files" >> gitto_commit_message
+      fi
+      if [[ -n "$mod_files" ]]; then 
+         echo modified: "$mod_files" >> gitto_commit_message
+      fi
+      if [[ -n "$del_files" ]]; then 
+         echo deleted: "$del_files" >> gitto_commit_message
+      fi
+      git commit -F gitto_commit_message
+      rm gitto_commit_message
+   else
+      echo Nothing to commit.
+      rc=1
+   fi
+}
+
+function gitto_push {
+   cat "$gitto_dir/.gitto" |
+   while read l; do
+      cmd=$(echo "$l" | cut -d ' ' -f 1 -)
+      if [ "$cmd" == "remote" ]; then
+         remote_name=$(echo "$l" | cut -d ' ' -f 2 -)
+         if [ "$remote_name" != "" ]; then
+            git push "$remote_name"
+         else
+            echo "error: remote needs a name (""$remote_name"")."
+            rc=1
+         fi
+      fi
+   done
+}
+
+function gitto_disk_use {
+   du -sh .
+   du -sh .git
+   cat "$gitto_dir/.gitto" |
+   while read l; do
+      cmd=$(echo "$l" | cut -d ' ' -f 1 -)
+      if [ "$cmd" == "remote" ]; then
+         remote_name=$(echo "$l" | cut -d ' ' -f 2 -)
+         if [ "$remote_name" != "" ]; then
+            remote_url=$(git remote show "$remote_name" | grep ' Fetch URL: ' | tr ' ' '~')
+            remote_url="${remote_url#~~Fetch~URL:~}"
+            if [ -d "$remote_url" ]; then
+               echo "$remote_name"
+               du -sh "$remote_url"
+            else
+               echo "warning: remote url (""$remote_url"") isn't on local file system or doesn't exist."
+            fi
+         else
+            echo "warning: remote needs a name (""$remote_name"")."
+            rc=1
+         fi
+      fi
+   done
+}
+
+function gitto_flash {
+   grep -q '^mode sync' "$gitto_dir/.gitto"
+   if [ $? == 0 ]; then
+      if [[ -n "$(git ls-files --exclude-standard -omd)" ]]; then
+         echo gitto flash sync "$gitto_dir"
+         gitto_internal_sync
+         gitto_commit
+         if [ $? == 0 ]; then
+            gitto_push
+         fi
+      else
+         echo No changes to sync.
+         rc=1
+      fi
+   else
+      if [[ -n "$(git ls-files --exclude-standard -m)" ]]; then
+         echo gitto flash update "$gitto_dir"
+         gitto_internal_update
+         gitto_commit
+         if [ $? == 0 ]; then
+            gitto_push
+         fi
+      else
+         echo No changes to sync.
+         rc=1
+      fi
+   fi
+}
+
+function gitto_action {
+   gitto_dir="$PWD"
+   gitto_exit_gitto_file_does_not_exist
+   gitto_exit_if_branch_is_not_gitto
+   lock_file="$gitto_dir/.gitto.lock"
+   lockfile -1 ${lock_file}
+   trap "rm -f ${lock_file}; exit" INT TERM EXIT
+   case "$1" in
+      check) gitto_check;;
+      update) gitto_update;;
+      sync) gitto_sync;;
+      commit)
+         args="${@#*commit}"
+         args="${args#\ }"
+         gitto_commit "$args"
+      ;;
+      push) gitto_push;;
+      flash) gitto_flash;;
+      ls-new|lsn) gitto_ls_new;;
+      disk-use|du) gitto_disk_use;;
+      *)
+         echo "error: unknown action."
+         rc=1
+      ;;
+   esac
+   rm -f ${lock_file}
+   trap - INT TERM EXIT
+}
+
+function gitto_loop_dirs {
+   find -maxdepth 1 -type d ! -name '.*' -printf "%f\n" |
+   while read f; do
+      echo ============================================== "$f";
+      cd "$f";
+      gitto_action "$@";
+      cd ..;
+   done
+}
+
+function gitto_monitor {
+   echo gitto monitor
+   inotifywait -mrqe modify,move,create,delete --format '%w' --excludei '/((.(git|configs|codeguard))|obj|release|debug|dat)/' $@ |
+   while read notification; do
+      echo event "$notification"
+      dir="$notification"
+      dir="${dir%/*}"
+      while [ $dir -a -d $dir ]; do
+         if [ -f $dir/.gitto -a -d $dir/.git ]; then
+            cd $dir
+            gitto_dir=$dir
+            if [ -f "$gitto_dir/.gitto" -a -d "$gitto_dir/.git" ]; then
+               branch_name=$(git symbolic-ref -q HEAD)
+               branch_name="${branch_name##refs/heads/}"
+               if [ "$branch_name" == "gitto" ]; then
+                  gitto flash
+               fi
+            fi
+         fi
+         dir="${dir%/*}"
+      done
+   done
+}
+
+function gitto_main {
+   case "$1" in
+      create)
+#         args="${@#*create}"
+#         args="${args#\ }"
+#         gitto_destroy "$args"
+         gitto_create "$2" "$3" "$4"
+      ;;
+      destroy) gitto_destroy "$2";;
+      monitor)
+         args="${@#*monitor}"
+         args="${args#\ }"
+         gitto_monitor "$args"
+      ;;
+      loop-dirs)
+         args="${@#*loop-dirs}"
+         args="${args#\ }"
+         gitto_loop_dirs "$args"
+      ;;
+      *) gitto_action "$@";;
+   esac
+   exit "$rc"
+}
+
+gitto_main "$@"

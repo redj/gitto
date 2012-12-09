@@ -1,0 +1,46 @@
+
+# Ecere files
+*.ews
+*.Makefile
+*.imp
+*.sym
+*.main.ec
+*.bowl
+
+# Intermediate dirs
+obj/
+debug/
+release/
+
+# Compiler configuration dirs
+.configs/
+
+# Compiled source
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+*.a
+*.la
+*.lo
+*.lai
+*.lib
+
+# Packages
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+*.bz2
+
+# OS generated files
+.DS_Store
+ehthumbs.db
+Icon
+Thumbs.db
